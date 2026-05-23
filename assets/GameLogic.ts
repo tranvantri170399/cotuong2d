@@ -1,6 +1,15 @@
-import { _decorator, Component, Node, Prefab, instantiate, Sprite, Vec3, SpriteFrame, UITransform, Size, Vec2, AudioClip, AudioSource, tween, Vec4, view } from 'cc';
-import { ChessRules } from './ChessRules';
+import {
+    _decorator, Component, Node, Prefab, instantiate, Sprite, Vec3, SpriteFrame,
+    UITransform, Size, Vec2, AudioClip, AudioSource, tween, view, Label, Color
+} from 'cc';
+import { ChessRules, ChessNode } from './ChessRules';
 const { ccclass, property } = _decorator;
+
+const TEAM_BLACK = 0;
+const TEAM_RED = 1;
+const PIECE_NAME = 'ChessPiece';
+const HINT_NAME = 'HintNode';
+const GAMEOVER_NAME = 'GameOverPanel';
 
 @ccclass('GameLogic')
 export class GameLogic extends Component {
@@ -19,15 +28,22 @@ export class GameLogic extends Component {
     @property public offsetX: number = -0.3125;
     @property public offsetY: number = 0.361328125;
 
-    private selectedPiece: Node = null;
+    private selectedPiece: ChessNode = null;
     private boardState: (Node | null)[][] = [];
     private audioSource: AudioSource = null; // Dùng cho SFX (hiệu ứng)
     private bgSource: AudioSource = null;    // Dùng riêng cho nhạc nền
-    private riverEffect1: Node = null;
-    private riverEffect2: Node = null;
+
+    // --- LƯỢT ĐI / TRẠNG THÁI ---
+    private currentTurn: number = TEAM_RED; // Cờ Tướng: Đỏ đi trước
+    private gameOver: boolean = false;
+    private gameOverNode: Node = null;
+
+    // --- HIỆU ỨNG SÔNG ---
+    private riverTile1: Node = null;
+    private riverTile2: Node = null;
     private riverLoopWidth: number = 0;
     private riverScrollSpeed: number = 40;
-    private riverStartPos1: Vec3 = null;
+    private riverStartPos: Vec3 = null;
     private riverOffset: number = 0;
 
     start() {
@@ -41,9 +57,8 @@ export class GameLogic extends Component {
         // Cấu hình và phát nhạc nền
         if (this.bgMusic) {
             this.bgSource.clip = this.bgMusic;
-            this.bgSource.loop = true;      // Phát lặp lại
-            this.bgSource.playOnAwake = true;
-            this.bgSource.volume = 0.3;     // Nhạc nền nên nhỏ (30%) để không át tiếng quân cờ
+            this.bgSource.loop = true;
+            this.bgSource.volume = 0.3; // Nhạc nền nhỏ để không át tiếng quân cờ
             this.bgSource.play();
         }
 
@@ -52,67 +67,58 @@ export class GameLogic extends Component {
         this.playRiverEffect();
 
         this.node.on(Node.EventType.TOUCH_START, (event) => {
+            if (this.gameOver) return;
             if (this.selectedPiece) {
-                if (event.target === this.node || event.target.name === "HintNode") {
+                if (event.target === this.node || event.target.name === HINT_NAME) {
                     this.handleMove(event);
                 }
             }
         }, this);
-
     }
-    playRiverEffect() {
-        const song1 = this.node.getChildByName("River_Effect1");
-        const song2 = this.node.getChildByName("River_Effect2");
 
-        if (!song1 || !song2) {
-            console.error("Bạn chưa đặt đúng tên Node là River_Effect1 và River_Effect2");
+    playRiverEffect() {
+        const tile1 = this.node.getChildByName('River_Effect1');
+        const tile2 = this.node.getChildByName('River_Effect2');
+
+        if (!tile1 || !tile2) {
+            console.error('Bạn chưa đặt đúng tên Node là River_Effect1 và River_Effect2');
             return;
         }
 
-        const ui1 = song1.getComponent(UITransform);
-        const ui2 = song2.getComponent(UITransform);
+        const ui1 = tile1.getComponent(UITransform);
+        const ui2 = tile2.getComponent(UITransform);
 
         if (!ui1 || !ui2) {
-            console.error("River_Effect1 và River_Effect2 phải có UITransform");
+            console.error('River_Effect1 và River_Effect2 phải có UITransform');
             return;
         }
 
         // Dùng chiều rộng màn hình thực tế để river che được toàn bộ canvas
         const boardWidth = view.getVisibleSize().width;
-        const tileHeight = ui1.contentSize.height;
         const riverY = this.offsetY; // Trung tâm giữa row 4 và row 5
         const riverZ = 0;
 
         // Bắt buộc sizeMode = CUSTOM để sprite giãn theo contentSize
-        const sp1 = song1.getComponent(Sprite);
-        const sp2 = song2.getComponent(Sprite);
+        const sp1 = tile1.getComponent(Sprite);
+        const sp2 = tile2.getComponent(Sprite);
         if (sp1) sp1.sizeMode = Sprite.SizeMode.CUSTOM;
         if (sp2) sp2.sizeMode = Sprite.SizeMode.CUSTOM;
-
-        // Resize cả 2 tile về đúng board width
-        // ui1.setContentSize(boardWidth, tileHeight);
-        // ui2.setContentSize(boardWidth, tileHeight);
 
         const startPos1 = new Vec3(0, riverY, riverZ);
         const startPos2 = new Vec3(boardWidth, riverY, riverZ);
 
-        this.riverEffect1 = song1;
-        this.riverEffect2 = song2;
+        this.riverTile1 = tile1;
+        this.riverTile2 = tile2;
         this.riverLoopWidth = boardWidth;
-        this.riverStartPos1 = startPos1;
+        this.riverStartPos = startPos1;
         this.riverOffset = 0;
 
-        song1.setPosition(startPos1);
-        song2.setPosition(startPos2);
+        tile1.setPosition(startPos1);
+        tile2.setPosition(startPos2);
     }
 
     update(deltaTime: number) {
-        if (
-            !this.riverEffect1 ||
-            !this.riverEffect2 ||
-            !this.riverStartPos1 ||
-            this.riverLoopWidth <= 0
-        ) {
+        if (!this.riverTile1 || !this.riverTile2 || !this.riverStartPos || this.riverLoopWidth <= 0) {
             return;
         }
 
@@ -121,14 +127,12 @@ export class GameLogic extends Component {
             this.riverOffset %= this.riverLoopWidth;
         }
 
-        const x1 = this.riverStartPos1.x - this.riverOffset;
+        const x1 = this.riverStartPos.x - this.riverOffset;
         const x2 = x1 + this.riverLoopWidth;
 
-        this.riverEffect1.setPosition(new Vec3(x1, this.riverStartPos1.y, this.riverStartPos1.z));
-        this.riverEffect2.setPosition(new Vec3(x2, this.riverStartPos1.y, this.riverStartPos1.z));
+        this.riverTile1.setPosition(new Vec3(x1, this.riverStartPos.y, this.riverStartPos.z));
+        this.riverTile2.setPosition(new Vec3(x2, this.riverStartPos.y, this.riverStartPos.z));
     }
-
-    // ... (Giữ nguyên initBoardArray, setupFullBoard, createPiece) ...
 
     initBoardArray() {
         for (let i = 0; i < 9; i++) {
@@ -140,20 +144,16 @@ export class GameLogic extends Component {
     }
 
     setupFullBoard() {
-        // KHÔNG dùng this.node.removeAllChildren() nữa.
-
-        // Tìm và xóa tất cả quân cờ cũ + điểm gợi ý, giữ lại dòng sông
-        const children = this.node.children.slice(); // Copy mảng con
-        children.forEach(child => {
-            // Chỉ xóa nếu là điểm gợi ý hoặc quân cờ (tên không phải River_Effect)
-            if (child.name === "HintNode" || child.name.includes("piece") || child.getComponent(Sprite)) {
-                // Lưu ý: Nếu bạn instantiate từ prefab, hãy kiểm tra logic xóa phù hợp
-                // Để an toàn, ở đây mình chỉ xóa những gì không phải là "River_Effect"
-                if (child.name !== "River_Effect1" && child.name !== "River_Effect2" && child.name !== "t1" && child.name !== "t2") {
-                    child.destroy();
-                }
+        // Xóa các node quân cờ + gợi ý cũ (giữ nguyên hiệu ứng sông và background)
+        this.node.children.slice().forEach(child => {
+            if (child.name === PIECE_NAME || child.name === HINT_NAME || child.name === GAMEOVER_NAME) {
+                child.destroy();
             }
         });
+
+        // Reset toàn bộ trạng thái bàn cờ trước khi tạo lại quân
+        this.initBoardArray();
+
         const layout = [
             { c: 0, r: 0, id: 12 }, { c: 1, r: 0, id: 0 }, { c: 2, r: 0, id: 10 }, { c: 3, r: 0, id: 4 }, { c: 4, r: 0, id: 8 }, { c: 5, r: 0, id: 4 }, { c: 6, r: 0, id: 10 }, { c: 7, r: 0, id: 0 }, { c: 8, r: 0, id: 12 },
             { c: 1, r: 2, id: 2 }, { c: 7, r: 2, id: 2 },
@@ -166,95 +166,94 @@ export class GameLogic extends Component {
     }
 
     createPiece(col: number, row: number, imgIdx: number) {
-        let piece = instantiate(this.chessPrefab);
+        const piece = instantiate(this.chessPrefab) as ChessNode;
+        piece.name = PIECE_NAME;
         piece.parent = this.node;
-        (piece as any).chessId = imgIdx;
-        (piece as any).col = col;
-        (piece as any).row = row;
+        piece.chessId = imgIdx;
+        piece.col = col;
+        piece.row = row;
         this.boardState[col][row] = piece;
 
-        let spriteNode = piece.getChildByName("sprite_quan_co");
+        const spriteNode = piece.getChildByName('sprite_quan_co');
         if (spriteNode) {
-            let sprite = spriteNode.getComponent(Sprite);
+            const sprite = spriteNode.getComponent(Sprite);
             sprite.spriteFrame = this.pieceImages[imgIdx];
             sprite.sizeMode = Sprite.SizeMode.CUSTOM;
             spriteNode.getComponent(UITransform).setContentSize(new Size(80, 80));
         }
 
         piece.setPosition(this.getBoardPosition(col, row));
-        piece.on(Node.EventType.TOUCH_START, (e) => {
+        piece.on(Node.EventType.TOUCH_START, (e: any) => {
             e.propagationStopped = true;
             this.onPieceSelected(piece);
         }, this);
 
-        let glowNode = piece.getChildByName("glow");
+        const glowNode = piece.getChildByName('glow');
         if (glowNode) glowNode.active = false;
     }
 
-    onPieceSelected(piece: Node) {
-        if (this.selectedPiece && this.selectedPiece !== piece) {
-            const selectedId = (this.selectedPiece as any).chessId;
-            const targetId = (piece as any).chessId;
+    onPieceSelected(piece: ChessNode) {
+        if (this.gameOver) return;
 
-            if ((selectedId % 2) !== (targetId % 2)) {
-                const c = (this.selectedPiece as any).col;
-                const r = (this.selectedPiece as any).row;
-                const moves = ChessRules.getValidMoves(c, r, selectedId, this.boardState);
+        const pTeam = piece.chessId % 2;
 
-                const targetCol = (piece as any).col;
-                const targetRow = (piece as any).row;
-                const isValid = moves.some(m => m.x === targetCol && m.y === targetRow);
+        // Click vào quân cùng phe đang đến lượt -> chọn quân đó
+        if (pTeam === this.currentTurn) {
+            this.selectNewPiece(piece);
+            return;
+        }
 
-                if (isValid) {
-                    this.executeMove(targetCol, targetRow);
-                    return;
-                }
+        // Click vào quân địch -> nếu đang chọn quân nhà và đây là nước hợp lệ thì ăn
+        if (this.selectedPiece) {
+            const sel = this.selectedPiece;
+            const moves = ChessRules.getValidMoves(sel.col, sel.row, sel.chessId, this.boardState);
+            if (moves.some(m => m.x === piece.col && m.y === piece.row)) {
+                this.executeMove(piece.col, piece.row);
             }
         }
-        this.selectNewPiece(piece);
     }
 
-    selectNewPiece(piece: Node) {
+    selectNewPiece(piece: ChessNode) {
         if (this.selectedPiece) {
-            let g = this.selectedPiece.getChildByName("glow");
+            const g = this.selectedPiece.getChildByName('glow');
             if (g) g.active = false;
         }
 
         this.selectedPiece = piece;
-        let glow = piece.getChildByName("glow");
+        const glow = piece.getChildByName('glow');
         if (glow) {
             glow.active = true;
             glow.getComponent(UITransform).setContentSize(new Size(100, 100));
         }
 
         this.clearHints();
-        let moves = ChessRules.getValidMoves((piece as any).col, (piece as any).row, (piece as any).chessId, this.boardState);
+        const moves = ChessRules.getValidMoves(piece.col, piece.row, piece.chessId, this.boardState);
         moves.forEach(m => this.createHint(m.x, m.y));
     }
 
     executeMove(col: number, row: number) {
-        if (!this.selectedPiece) return;
+        if (!this.selectedPiece || this.gameOver) return;
 
-        let targetPiece = this.boardState[col][row];
-        let isCapture = targetPiece !== null && targetPiece !== this.selectedPiece;
+        const movingPiece = this.selectedPiece;
+        const movedTeam = movingPiece.chessId % 2;
+        const targetPiece = this.boardState[col][row];
+        const isCapture = targetPiece !== null && targetPiece !== movingPiece;
 
         if (isCapture) {
             targetPiece.destroy();
         }
 
         // Cập nhật mảng trạng thái
-        this.boardState[(this.selectedPiece as any).col][(this.selectedPiece as any).row] = null;
-        (this.selectedPiece as any).col = col;
-        (this.selectedPiece as any).row = row;
-        this.boardState[col][row] = this.selectedPiece;
+        this.boardState[movingPiece.col][movingPiece.row] = null;
+        movingPiece.col = col;
+        movingPiece.row = row;
+        this.boardState[col][row] = movingPiece;
 
         // Hiệu ứng di chuyển trượt (Tween) + Phát âm thanh
         const targetPos = this.getBoardPosition(col, row);
-
-        tween(this.selectedPiece)
-            .to(0.1, { position: targetPos }) // Di chuyển trong 0.1s
+        tween(movingPiece)
+            .to(0.1, { position: targetPos })
             .call(() => {
-                // Phát âm thanh sau khi quân cờ hạ xuống
                 if (this.audioSource) {
                     const clip = isCapture ? this.captureSound : this.moveSound;
                     if (clip) this.audioSource.playOneShot(clip, 1.0);
@@ -263,13 +262,22 @@ export class GameLogic extends Component {
             .start();
 
         this.cancelSelection();
-    }
 
-    // ... (Giữ nguyên handleMove, createHint, clearHints, cancelSelection, getBoardPosition, getBoardCell) ...
+        // Đổi lượt và kiểm tra chiếu hết
+        const nextTurn = 1 - movedTeam;
+        this.currentTurn = nextTurn;
+
+        if (!ChessRules.hasAnyLegalMove(nextTurn, this.boardState)) {
+            // Bên đến lượt không có nước đi hợp lệ -> bên vừa đi thắng
+            this.showGameOver(movedTeam);
+        } else if (ChessRules.isInCheck(nextTurn, this.boardState)) {
+            console.log(`${nextTurn === TEAM_RED ? 'ĐỎ' : 'ĐEN'} đang bị chiếu!`);
+        }
+    }
 
     cancelSelection() {
         if (this.selectedPiece) {
-            let glow = this.selectedPiece.getChildByName("glow");
+            const glow = this.selectedPiece.getChildByName('glow');
             if (glow) glow.active = false;
             this.selectedPiece = null;
         }
@@ -278,26 +286,30 @@ export class GameLogic extends Component {
 
     createHint(c: number, r: number) {
         if (!this.hintPrefab) return;
-        let hint = instantiate(this.hintPrefab);
+        const hint = instantiate(this.hintPrefab);
         hint.parent = this.node;
-        hint.name = "HintNode";
+        hint.name = HINT_NAME;
         hint.layer = this.node.layer;
         hint.setPosition(this.getBoardPosition(c, r));
     }
 
     clearHints() {
-        this.node.children.filter(n => n.name === "HintNode").forEach(n => n.destroy());
+        this.node.children.filter(n => n.name === HINT_NAME).forEach(n => n.destroy());
     }
 
     handleMove(event: any) {
-        let touchPos = event.getUILocation();
-        let localPos = this.node.getComponent(UITransform).convertToNodeSpaceAR(new Vec3(touchPos.x, touchPos.y, 0));
-        let cell = this.getBoardCell(localPos);
-        let col = cell.x;
-        let row = cell.y;
+        if (this.gameOver || !this.selectedPiece) return;
+        const sel = this.selectedPiece;
+
+        const touchPos = event.getUILocation();
+        const localPos = this.node.getComponent(UITransform)
+            .convertToNodeSpaceAR(new Vec3(touchPos.x, touchPos.y, 0));
+        const cell = this.getBoardCell(localPos);
+        const col = cell.x;
+        const row = cell.y;
 
         if (ChessRules.isInBoard(col, row)) {
-            let moves = ChessRules.getValidMoves((this.selectedPiece as any).col, (this.selectedPiece as any).row, (this.selectedPiece as any).chessId, this.boardState);
+            const moves = ChessRules.getValidMoves(sel.col, sel.row, sel.chessId, this.boardState);
             if (moves.some(m => m.x === col && m.y === row)) {
                 this.executeMove(col, row);
             } else {
@@ -308,8 +320,57 @@ export class GameLogic extends Component {
         }
     }
 
+    // --- GAME OVER / RESTART ---
+
+    private showGameOver(winnerTeam: number) {
+        this.gameOver = true;
+        this.cancelSelection();
+
+        const node = new Node(GAMEOVER_NAME);
+        node.layer = this.node.layer;
+        node.parent = this.node;
+
+        const ui = node.addComponent(UITransform);
+        const size = view.getVisibleSize();
+        ui.setContentSize(size.width, size.height);
+
+        const label = node.addComponent(Label);
+        label.string = (winnerTeam === TEAM_RED ? 'ĐỎ THẮNG' : 'ĐEN THẮNG') + '\n\n(Chạm để chơi lại)';
+        label.fontSize = 56;
+        label.lineHeight = 72;
+        label.color = new Color(255, 215, 0);
+        label.horizontalAlign = Label.HorizontalAlign.CENTER;
+        label.verticalAlign = Label.VerticalAlign.CENTER;
+        label.isBold = true;
+
+        node.setPosition(0, 0, 100);
+        node.setSiblingIndex(this.node.children.length - 1);
+
+        node.on(Node.EventType.TOUCH_START, (e: any) => {
+            e.propagationStopped = true;
+            this.restartGame();
+        }, this);
+
+        this.gameOverNode = node;
+    }
+
+    private restartGame() {
+        if (this.gameOverNode) {
+            this.gameOverNode.destroy();
+            this.gameOverNode = null;
+        }
+        this.gameOver = false;
+        this.currentTurn = TEAM_RED;
+        this.selectedPiece = null;
+        this.setupFullBoard();
+    }
+
     private getBoardPosition(col: number, row: number): Vec3 {
-        return new Vec3((col - 4) * this.cellWidth + this.offsetX, (4.5 - row) * this.cellHeight + this.offsetY, 0);
+        return new Vec3(
+            (col - 4) * this.cellWidth + this.offsetX,
+            (4.5 - row) * this.cellHeight + this.offsetY,
+            0
+        );
     }
 
     private getBoardCell(localPos: Vec3): Vec2 {
