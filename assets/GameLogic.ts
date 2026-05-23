@@ -1,6 +1,6 @@
 import {
     _decorator, Component, Node, Prefab, instantiate, Sprite, Vec3, SpriteFrame,
-    UITransform, Size, Vec2, AudioClip, AudioSource, tween, view, Label, Color
+    UITransform, Size, Vec2, AudioClip, AudioSource, tween, view, Label, Color, Graphics
 } from 'cc';
 import { ChessRules, ChessNode } from './ChessRules';
 const { ccclass, property } = _decorator;
@@ -46,6 +46,11 @@ export class GameLogic extends Component {
     private riverStartPos: Vec3 = null;
     private riverOffset: number = 0;
 
+    // --- HUD ---
+    private turnLabelNode: Node = null;
+    private checkLabelNode: Node = null;
+    private restartBtnNode: Node = null;
+
     start() {
         // Khởi tạo Loa cho hiệu ứng (SFX)
         this.audioSource = this.getComponent(AudioSource);
@@ -65,6 +70,7 @@ export class GameLogic extends Component {
         this.initBoardArray();
         this.setupFullBoard();
         this.playRiverEffect();
+        this.createHUD();
 
         this.node.on(Node.EventType.TOUCH_START, (event) => {
             if (this.gameOver) return;
@@ -195,6 +201,12 @@ export class GameLogic extends Component {
     onPieceSelected(piece: ChessNode) {
         if (this.gameOver) return;
 
+        // Click lại quân đang chọn -> bỏ chọn
+        if (piece === this.selectedPiece) {
+            this.cancelSelection();
+            return;
+        }
+
         const pTeam = piece.chessId % 2;
 
         // Click vào quân cùng phe đang đến lượt -> chọn quân đó
@@ -266,12 +278,13 @@ export class GameLogic extends Component {
         // Đổi lượt và kiểm tra chiếu hết
         const nextTurn = 1 - movedTeam;
         this.currentTurn = nextTurn;
+        this.updateTurnLabel();
 
         if (!ChessRules.hasAnyLegalMove(nextTurn, this.boardState)) {
             // Bên đến lượt không có nước đi hợp lệ -> bên vừa đi thắng
             this.showGameOver(movedTeam);
         } else if (ChessRules.isInCheck(nextTurn, this.boardState)) {
-            console.log(`${nextTurn === TEAM_RED ? 'ĐỎ' : 'ĐEN'} đang bị chiếu!`);
+            this.showCheckWarning(nextTurn);
         }
     }
 
@@ -334,6 +347,17 @@ export class GameLogic extends Component {
         const size = view.getVisibleSize();
         ui.setContentSize(size.width, size.height);
 
+        // Nền mờ đen phủ toàn bộ màn hình
+        const bgNode = new Node('GameOverBg');
+        bgNode.layer = this.node.layer;
+        bgNode.parent = node;
+        bgNode.addComponent(UITransform).setContentSize(size.width, size.height);
+        const graphics = bgNode.addComponent(Graphics);
+        graphics.fillColor = new Color(0, 0, 0, 180);
+        graphics.rect(-size.width / 2, -size.height / 2, size.width, size.height);
+        graphics.fill();
+        bgNode.setPosition(0, 0, 0);
+
         const label = node.addComponent(Label);
         label.string = (winnerTeam === TEAM_RED ? 'ĐỎ THẮNG' : 'ĐEN THẮNG') + '\n\n(Chạm để chơi lại)';
         label.fontSize = 56;
@@ -355,14 +379,91 @@ export class GameLogic extends Component {
     }
 
     private restartGame() {
-        if (this.gameOverNode) {
+        if (this.gameOverNode && this.gameOverNode.isValid) {
             this.gameOverNode.destroy();
             this.gameOverNode = null;
+        }
+        if (this.checkLabelNode && this.checkLabelNode.isValid) {
+            this.checkLabelNode.destroy();
+            this.checkLabelNode = null;
         }
         this.gameOver = false;
         this.currentTurn = TEAM_RED;
         this.selectedPiece = null;
         this.setupFullBoard();
+        this.updateTurnLabel();
+    }
+
+    private createHUD() {
+        // Vị trí ngay trên đỉnh bàn cờ
+        const boardTop = 4.5 * this.cellHeight + this.offsetY + 30;
+        const boardRight = 4 * this.cellWidth + this.offsetX;
+
+        // Turn indicator
+        const turnNode = new Node('TurnLabel');
+        turnNode.layer = this.node.layer;
+        turnNode.parent = this.node;
+        turnNode.addComponent(UITransform).setContentSize(300, 56);
+        const turnLbl = turnNode.addComponent(Label);
+        turnLbl.fontSize = 34;
+        turnLbl.isBold = true;
+        turnLbl.horizontalAlign = Label.HorizontalAlign.CENTER;
+        turnLbl.verticalAlign = Label.VerticalAlign.CENTER;
+        turnNode.setPosition(-boardRight / 2, boardTop, 10);
+        this.turnLabelNode = turnNode;
+        this.updateTurnLabel();
+
+        // Nút Chơi lại
+        const restartNode = new Node('RestartBtn');
+        restartNode.layer = this.node.layer;
+        restartNode.parent = this.node;
+        restartNode.addComponent(UITransform).setContentSize(160, 50);
+        const restartLbl = restartNode.addComponent(Label);
+        restartLbl.string = '[ Chơi lại ]';
+        restartLbl.fontSize = 26;
+        restartLbl.color = new Color(220, 220, 100);
+        restartLbl.horizontalAlign = Label.HorizontalAlign.CENTER;
+        restartLbl.verticalAlign = Label.VerticalAlign.CENTER;
+        restartNode.setPosition(boardRight - 20, boardTop, 10);
+        restartNode.on(Node.EventType.TOUCH_START, (e: any) => {
+            e.propagationStopped = true;
+            this.restartGame();
+        }, this);
+        this.restartBtnNode = restartNode;
+    }
+
+    private updateTurnLabel() {
+        if (!this.turnLabelNode || !this.turnLabelNode.isValid) return;
+        const lbl = this.turnLabelNode.getComponent(Label);
+        if (!lbl) return;
+        lbl.string = this.currentTurn === TEAM_RED ? 'Lượt: ĐỎ' : 'Lượt: ĐEN';
+        lbl.color = this.currentTurn === TEAM_RED ? new Color(220, 50, 50) : new Color(20, 20, 20);
+    }
+
+    private showCheckWarning(team: number) {
+        if (this.checkLabelNode && this.checkLabelNode.isValid) {
+            this.checkLabelNode.destroy();
+            this.checkLabelNode = null;
+        }
+        const node = new Node('CheckWarning');
+        node.layer = this.node.layer;
+        node.parent = this.node;
+        node.addComponent(UITransform).setContentSize(500, 80);
+        const lbl = node.addComponent(Label);
+        lbl.string = (team === TEAM_RED ? 'ĐỎ' : 'ĐEN') + ' ĐANG BỊ CHIẾU!';
+        lbl.fontSize = 44;
+        lbl.isBold = true;
+        lbl.color = new Color(255, 80, 0);
+        lbl.horizontalAlign = Label.HorizontalAlign.CENTER;
+        lbl.verticalAlign = Label.VerticalAlign.CENTER;
+        node.setPosition(0, 0, 20);
+        this.checkLabelNode = node;
+        this.scheduleOnce(() => {
+            if (this.checkLabelNode && this.checkLabelNode.isValid) {
+                this.checkLabelNode.destroy();
+                this.checkLabelNode = null;
+            }
+        }, 2.0);
     }
 
     private getBoardPosition(col: number, row: number): Vec3 {
