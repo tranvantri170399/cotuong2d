@@ -1,0 +1,14 @@
+{
+  "ver": "1.1.50",
+  "importer": "prefab",
+  "imported": true,
+  "uuid": "de8d13e5-c7f9-42a9-8f63-e35e54899cda",
+  "files": [
+    ".json"
+  ],
+  "subMetas": {},
+  "userData": {
+    "syncNodeName": "CaptureEffect2D",
+    "persistent": false
+  }
+}

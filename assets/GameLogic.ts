@@ -1,9 +1,44 @@
 import {
-    _decorator, Component, Node, Prefab, instantiate, Sprite, Vec3, SpriteFrame,
-    UITransform, Size, Vec2, AudioClip, AudioSource, tween, view, Label, Color, Graphics
+    _decorator,
+    AudioClip, AudioSource,
+    Color,
+    Component,
+    Graphics,
+    instantiate,
+    Label,
+    Node, Prefab,
+    Size,
+    Sprite,
+    SpriteFrame,
+    tween,
+    UITransform,
+    Vec2,
+    Vec3,
+    view
 } from 'cc';
-import { ChessRules, ChessNode } from './ChessRules';
+import { AIPlayer } from './AIPlayer';
+import { CannonAttackEffect2D } from './CannonAttackEffect2D';
+import { ChariotAttackEffect2D } from './ChariotAttackEffect2D';
+import { ChessNode, ChessRules } from './ChessRules';
+import { HorseAttackEffect2D } from './HorseAttackEffect2D';
 const { ccclass, property } = _decorator;
+
+enum AIDifficulty {
+    Easy = 0,
+    Medium = 1,
+    Hard = 2
+}
+
+interface MoveRecord {
+    piece: ChessNode;
+    fromCol: number;
+    fromRow: number;
+    toCol: number;
+    toRow: number;
+    capturedPiece: ChessNode | null;
+    capturedChessId: number | null;
+    wasGameOver: boolean;
+}
 
 const TEAM_BLACK = 0;
 const TEAM_RED = 1;
@@ -23,15 +58,27 @@ export class GameLogic extends Component {
     @property(AudioClip) public bgMusic: AudioClip = null;
     // ---------------------
 
+    // --- HIỆU ỨNG ---
+    @property(Prefab) public captureParticle: Prefab = null; // Particle khi ăn quân
+    @property(Prefab) public cannonAttackEffectPrefab: Prefab = null; // Hiệu ứng pháo bắn đạn
+    @property(Prefab) public horseAttackEffectPrefab: Prefab = null; // Hiệu ứng ngựa ăn quân
+    @property(Prefab) public chariotAttackEffectPrefab: Prefab = null; // Hiệu ứng xe ăn quân
+    @property(Node) public effectLayer: Node = null; // Layer để hiển thị hiệu ứng
+    // ----------------
+
     @property public cellWidth: number = 71.640625;
     @property public cellHeight: number = 73.63064236111111;
-    @property public offsetX: number = -0.3125;
+    @property public offsetX: number = -0.3385;
     @property public offsetY: number = 0.361328125;
 
     private selectedPiece: ChessNode = null;
     private boardState: (Node | null)[][] = [];
     private audioSource: AudioSource = null; // Dùng cho SFX (hiệu ứng)
     private bgSource: AudioSource = null;    // Dùng riêng cho nhạc nền
+
+    // --- CAPTURED PIECE FOR UNDO ---
+    private lastCapturedPiece: ChessNode | null = null;
+    private lastCapturedChessId: number | null = null;
 
     // --- LƯỢT ĐI / TRẠNG THÁI ---
     private currentTurn: number = TEAM_RED; // Cờ Tướng: Đỏ đi trước
@@ -50,6 +97,15 @@ export class GameLogic extends Component {
     private turnLabelNode: Node = null;
     private checkLabelNode: Node = null;
     private restartBtnNode: Node = null;
+    private undoBtnNode: Node = null;
+
+    // --- MOVE HISTORY ---
+    private moveHistory: MoveRecord[] = [];
+
+    // --- AI ---
+    public aiDifficulty: number = 1; // 0: Easy, 1: Medium, 2: Hard
+    public aiEnabled: boolean = true;
+    private aiThinking: boolean = false;
 
     start() {
         // Khởi tạo Loa cho hiệu ứng (SFX)
@@ -67,6 +123,87 @@ export class GameLogic extends Component {
             this.bgSource.play();
         }
 
+        // Hiển thị menu chọn cấp độ khó
+        this.showDifficultyMenu();
+    }
+
+    private showDifficultyMenu() {
+        const menuNode = new Node('DifficultyMenu');
+        menuNode.layer = this.node.layer;
+        menuNode.parent = this.node;
+
+        const ui = menuNode.addComponent(UITransform);
+        const size = view.getVisibleSize();
+        ui.setContentSize(size.width, size.height);
+
+        // Nền mờ đen
+        const bgNode = new Node('MenuBg');
+        bgNode.layer = this.node.layer;
+        bgNode.parent = menuNode;
+        bgNode.addComponent(UITransform).setContentSize(size.width, size.height);
+        const graphics = bgNode.addComponent(Graphics);
+        graphics.fillColor = new Color(0, 0, 0, 200);
+        graphics.rect(-size.width / 2, -size.height / 2, size.width, size.height);
+        graphics.fill();
+        bgNode.setPosition(0, 0, 200);
+
+        // Label tiêu đề
+        const titleLabel = new Node('TitleLabel');
+        titleLabel.layer = this.node.layer;
+        titleLabel.parent = menuNode;
+        titleLabel.addComponent(UITransform).setContentSize(400, 80);
+        const titleLbl = titleLabel.addComponent(Label);
+        titleLbl.string = 'Chọn cấp độ khó';
+        titleLbl.fontSize = 48;
+        titleLbl.isBold = true;
+        titleLbl.color = new Color(255, 215, 0);
+        titleLbl.horizontalAlign = Label.HorizontalAlign.CENTER;
+        titleLbl.verticalAlign = Label.VerticalAlign.CENTER;
+        titleLabel.setPosition(0, 150, 201);
+
+        // Nút Dễ
+        this.createDifficultyButton(menuNode, 'Dễ', 0, 50, 201, () => {
+            this.aiDifficulty = AIDifficulty.Easy;
+            this.startGame(menuNode);
+        });
+
+        // Nút Thường
+        this.createDifficultyButton(menuNode, 'Thường', 1, 0, 201, () => {
+            this.aiDifficulty = AIDifficulty.Medium;
+            this.startGame(menuNode);
+        });
+
+        // Nút Khó
+        this.createDifficultyButton(menuNode, 'Khó', 2, -50, 201, () => {
+            this.aiDifficulty = AIDifficulty.Hard;
+            this.startGame(menuNode);
+        });
+    }
+
+    private createDifficultyButton(parent: Node, text: string, index: number, yOffset: number, zOrder: number, callback: () => void) {
+        const btnNode = new Node('DifficultyBtn_' + text);
+        btnNode.layer = this.node.layer;
+        btnNode.parent = parent;
+        btnNode.addComponent(UITransform).setContentSize(200, 60);
+        const lbl = btnNode.addComponent(Label);
+        lbl.string = text;
+        lbl.fontSize = 32;
+        lbl.isBold = true;
+        lbl.color = new Color(100, 200, 220);
+        lbl.horizontalAlign = Label.HorizontalAlign.CENTER;
+        lbl.verticalAlign = Label.VerticalAlign.CENTER;
+        btnNode.setPosition(0, yOffset, zOrder);
+        btnNode.on(Node.EventType.TOUCH_START, (e: any) => {
+            e.propagationStopped = true;
+            callback();
+        }, this);
+    }
+
+    private startGame(menuNode: Node) {
+        // Xóa menu
+        menuNode.destroy();
+
+        // Khởi tạo game
         this.initBoardArray();
         this.setupFullBoard();
         this.playRiverEffect();
@@ -100,7 +237,7 @@ export class GameLogic extends Component {
         }
 
         // Dùng chiều rộng màn hình thực tế để river che được toàn bộ canvas
-        const boardWidth = view.getVisibleSize().width;
+        const boardWidth = 1109.532;
         const riverY = this.offsetY; // Trung tâm giữa row 4 và row 5
         const riverZ = 0;
 
@@ -180,13 +317,34 @@ export class GameLogic extends Component {
         piece.row = row;
         this.boardState[col][row] = piece;
 
+        console.log(`[DEBUG] Creating piece at (${col},${row}) with imgIdx=${imgIdx}, pieceImages.length=${this.pieceImages.length}`);
+
         const spriteNode = piece.getChildByName('sprite_quan_co');
-        if (spriteNode) {
-            const sprite = spriteNode.getComponent(Sprite);
-            sprite.spriteFrame = this.pieceImages[imgIdx];
-            sprite.sizeMode = Sprite.SizeMode.CUSTOM;
-            spriteNode.getComponent(UITransform).setContentSize(new Size(80, 80));
+        if (!spriteNode) {
+            console.error(`[ERROR] Prefab không có node con tên 'sprite_quan_co'`);
+            return;
         }
+
+        const sprite = spriteNode.getComponent(Sprite);
+        if (!sprite) {
+            console.error(`[ERROR] Node 'sprite_quan_co' không có component Sprite`);
+            return;
+        }
+
+        if (!this.pieceImages || this.pieceImages.length === 0) {
+            console.error(`[ERROR] pieceImages chưa được gán trong Inspector (array rỗng)`);
+            return;
+        }
+
+        if (imgIdx < 0 || imgIdx >= this.pieceImages.length) {
+            console.error(`[ERROR] imgIdx=${imgIdx} nằm ngoài phạm vi pieceImages (length=${this.pieceImages.length})`);
+            return;
+        }
+
+        sprite.spriteFrame = this.pieceImages[imgIdx];
+        sprite.sizeMode = Sprite.SizeMode.CUSTOM;
+        spriteNode.getComponent(UITransform).setContentSize(new Size(70, 70));
+        console.log(`[DEBUG] Gán spriteFrame thành công cho imgIdx=${imgIdx}`);
 
         piece.setPosition(this.getBoardPosition(col, row));
         piece.on(Node.EventType.TOUCH_START, (e: any) => {
@@ -235,7 +393,7 @@ export class GameLogic extends Component {
         const glow = piece.getChildByName('glow');
         if (glow) {
             glow.active = true;
-            glow.getComponent(UITransform).setContentSize(new Size(100, 100));
+            glow.getComponent(UITransform).setContentSize(new Size(120, 120));
         }
 
         this.clearHints();
@@ -251,15 +409,100 @@ export class GameLogic extends Component {
         const targetPiece = this.boardState[col][row];
         const isCapture = targetPiece !== null && targetPiece !== movingPiece;
 
+        // Lưu thông tin quân bị ăn cho undo
         if (isCapture) {
-            targetPiece.destroy();
+            this.lastCapturedPiece = targetPiece as ChessNode;
+            this.lastCapturedChessId = (targetPiece as ChessNode).chessId;
+        } else {
+            this.lastCapturedPiece = null;
+            this.lastCapturedChessId = null;
         }
+
+        if (isCapture) {
+            // Nếu là pháo ăn quân → dùng hiệu ứng pháo bắn đạn
+            const isCannon = movingPiece.chessId === 2 || movingPiece.chessId === 3;
+            const isHorse = movingPiece.chessId === 0 || movingPiece.chessId === 1;
+            const isChariot = movingPiece.chessId === 12 || movingPiece.chessId === 13;
+
+            console.log(`[DEBUG] Capture: chessId=${movingPiece.chessId}, isCannon=${isCannon}, isHorse=${isHorse}, horsePrefab=${!!this.horseAttackEffectPrefab}`);
+
+            if (isCannon && this.cannonAttackEffectPrefab) {
+                const fx = instantiate(this.cannonAttackEffectPrefab);
+                fx.setParent(this.effectLayer || this.node);
+                fx.getComponent(CannonAttackEffect2D)?.play(
+                    movingPiece.worldPosition,
+                    targetPiece.worldPosition,
+                    () => {
+                        this.playCaptureEffect(targetPiece.worldPosition);
+                        targetPiece.destroy();
+                        this.finishMove(movingPiece, movedTeam, col, row, true);
+                    }
+                );
+                return; // Đợi hiệu ứng xong
+            } else if (isHorse && this.horseAttackEffectPrefab) {
+                console.log(`[DEBUG] Playing horse effect`);
+                const fx = instantiate(this.horseAttackEffectPrefab);
+                fx.setParent(this.effectLayer || this.node);
+                fx.getComponent(HorseAttackEffect2D)?.play(
+                    movingPiece.worldPosition,
+                    targetPiece.worldPosition,
+                    () => {
+                        this.playCaptureEffect(targetPiece.worldPosition);
+                        targetPiece.destroy();
+                        this.finishMove(movingPiece, movedTeam, col, row, true);
+                    }
+                );
+                return; // Đợi hiệu ứng xong
+            } else if (isChariot && this.chariotAttackEffectPrefab) {
+                const fx = instantiate(this.chariotAttackEffectPrefab);
+                fx.setParent(this.effectLayer || this.node);
+                fx.getComponent(ChariotAttackEffect2D)?.play(
+                    movingPiece.worldPosition,
+                    targetPiece.worldPosition,
+                    () => {
+                        this.playCaptureEffect(targetPiece.worldPosition);
+                        targetPiece.destroy();
+                        this.finishMove(movingPiece, movedTeam, col, row, true);
+                    }
+                );
+                return;
+            } else {
+                // Quân khác ăn quân → dùng particle thường
+                this.playCaptureEffect(targetPiece.worldPosition);
+                targetPiece.destroy();
+            }
+        }
+
+        this.finishMove(movingPiece, movedTeam, col, row, isCapture);
+    }
+
+    private finishMove(movingPiece: ChessNode, movedTeam: number, col: number, row: number, isCapture: boolean) {
+        // Lưu vị trí cũ trước khi cập nhật
+        const fromCol = movingPiece.col;
+        const fromRow = movingPiece.row;
 
         // Cập nhật mảng trạng thái
         this.boardState[movingPiece.col][movingPiece.row] = null;
         movingPiece.col = col;
         movingPiece.row = row;
         this.boardState[col][row] = movingPiece;
+
+        // Lưu record vào moveHistory
+        const record: MoveRecord = {
+            piece: movingPiece,
+            fromCol: fromCol,
+            fromRow: fromRow,
+            toCol: col,
+            toRow: row,
+            capturedPiece: this.lastCapturedPiece,
+            capturedChessId: this.lastCapturedChessId,
+            wasGameOver: this.gameOver
+        };
+        this.moveHistory.push(record);
+
+        // Reset captured info
+        this.lastCapturedPiece = null;
+        this.lastCapturedChessId = null;
 
         // Hiệu ứng di chuyển trượt (Tween) + Phát âm thanh
         const targetPos = this.getBoardPosition(col, row);
@@ -286,6 +529,14 @@ export class GameLogic extends Component {
         } else if (ChessRules.isInCheck(nextTurn, this.boardState)) {
             this.showCheckWarning(nextTurn);
         }
+
+        // AI đánh nếu đến lượt AI và AI được bật
+        if (this.aiEnabled && this.currentTurn === TEAM_BLACK && !this.gameOver) {
+            const thinkingDelay = 1 + Math.random();
+            this.scheduleOnce(() => {
+                this.makeAIMove();
+            }, thinkingDelay);
+        }
     }
 
     cancelSelection() {
@@ -295,6 +546,89 @@ export class GameLogic extends Component {
             this.selectedPiece = null;
         }
         this.clearHints();
+    }
+
+    undoLastMove() {
+        if (this.moveHistory.length === 0) return;
+
+        const record = this.moveHistory.pop();
+        if (!record) return;
+
+        // Xóa highlight/gợi ý cũ
+        this.cancelSelection();
+
+        // Restore quân về vị trí cũ
+        this.boardState[record.toCol][record.toRow] = null;
+        record.piece.col = record.fromCol;
+        record.piece.row = record.fromRow;
+        this.boardState[record.fromCol][record.fromRow] = record.piece;
+        record.piece.setPosition(this.getBoardPosition(record.fromCol, record.fromRow));
+
+        // Restore quân bị ăn nếu có
+        if (record.capturedPiece && record.capturedChessId !== null) {
+            // Tạo lại quân bị ăn
+            const restoredPiece = instantiate(this.chessPrefab) as ChessNode;
+            restoredPiece.name = PIECE_NAME;
+            restoredPiece.parent = this.node;
+            restoredPiece.chessId = record.capturedChessId;
+            restoredPiece.col = record.toCol;
+            restoredPiece.row = record.toRow;
+            this.boardState[record.toCol][record.toRow] = restoredPiece;
+
+            const spriteNode = restoredPiece.getChildByName('sprite_quan_co');
+            if (spriteNode) {
+                const sprite = spriteNode.getComponent(Sprite);
+                if (sprite && this.pieceImages[record.capturedChessId]) {
+                    sprite.spriteFrame = this.pieceImages[record.capturedChessId];
+                    sprite.sizeMode = Sprite.SizeMode.CUSTOM;
+                    spriteNode.getComponent(UITransform).setContentSize(new Size(70, 70));
+                }
+            }
+            restoredPiece.setPosition(this.getBoardPosition(record.toCol, record.toRow));
+            restoredPiece.on(Node.EventType.TOUCH_START, (e: any) => {
+                e.propagationStopped = true;
+                this.onPieceSelected(restoredPiece);
+            }, this);
+
+            const glow = restoredPiece.getChildByName('glow');
+            if (glow) glow.active = false;
+        }
+
+        // Đổi lượt về phe trước đó
+        this.currentTurn = 1 - this.currentTurn;
+        this.updateTurnLabel();
+
+        // Xóa cảnh báo chiếu nếu có
+        if (this.checkLabelNode && this.checkLabelNode.isValid) {
+            this.checkLabelNode.destroy();
+            this.checkLabelNode = null;
+        }
+
+        // Nếu trước đó game over thì xóa game over panel
+        if (record.wasGameOver && this.gameOverNode && this.gameOverNode.isValid) {
+            this.gameOverNode.destroy();
+            this.gameOverNode = null;
+            this.gameOver = false;
+        }
+    }
+
+    private makeAIMove() {
+        if (this.aiThinking || this.gameOver) return;
+
+        this.aiThinking = true;
+
+        // Lấy nước đi tốt nhất từ AI
+        const aiMove = AIPlayer.getBestMove(this.boardState, TEAM_BLACK, this.aiDifficulty as AIDifficulty);
+
+        if (aiMove) {
+            const foundPiece = this.boardState[aiMove.from.x][aiMove.from.y] as ChessNode | null;
+            if (foundPiece && foundPiece.chessId % 2 === TEAM_BLACK) {
+                this.selectedPiece = foundPiece;
+                this.executeMove(aiMove.to.x, aiMove.to.y);
+            }
+        }
+
+        this.aiThinking = false;
     }
 
     createHint(c: number, r: number) {
@@ -390,6 +724,9 @@ export class GameLogic extends Component {
         this.gameOver = false;
         this.currentTurn = TEAM_RED;
         this.selectedPiece = null;
+        this.moveHistory = []; // Reset lịch sử nước đi
+        this.lastCapturedPiece = null;
+        this.lastCapturedChessId = null;
         this.setupFullBoard();
         this.updateTurnLabel();
     }
@@ -412,6 +749,24 @@ export class GameLogic extends Component {
         turnNode.setPosition(-boardRight / 2, boardTop, 10);
         this.turnLabelNode = turnNode;
         this.updateTurnLabel();
+
+        // Nút Undo
+        const undoNode = new Node('UndoBtn');
+        undoNode.layer = this.node.layer;
+        undoNode.parent = this.node;
+        undoNode.addComponent(UITransform).setContentSize(140, 50);
+        const undoLbl = undoNode.addComponent(Label);
+        undoLbl.string = '[ Undo ]';
+        undoLbl.fontSize = 26;
+        undoLbl.color = new Color(100, 200, 220);
+        undoLbl.horizontalAlign = Label.HorizontalAlign.CENTER;
+        undoLbl.verticalAlign = Label.VerticalAlign.CENTER;
+        undoNode.setPosition(boardRight - 180, boardTop, 10);
+        undoNode.on(Node.EventType.TOUCH_START, (e: any) => {
+            e.propagationStopped = true;
+            this.undoLastMove();
+        }, this);
+        this.undoBtnNode = undoNode;
 
         // Nút Chơi lại
         const restartNode = new Node('RestartBtn');
@@ -464,6 +819,21 @@ export class GameLogic extends Component {
                 this.checkLabelNode = null;
             }
         }, 2.0);
+    }
+
+    private playCaptureEffect(pos: Vec3) {
+        if (!this.captureParticle) return;
+        const particle = instantiate(this.captureParticle);
+        particle.parent = this.node;
+        particle.layer = this.node.layer;
+        // Convert world position to local position nếu cần
+        const ui = this.node.getComponent(UITransform);
+        const localPos = ui ? ui.convertToNodeSpaceAR(pos) : pos;
+        particle.setPosition(localPos);
+        // Particle tự destroy sau 1 giây (tùy chỉnh theo particle duration)
+        this.scheduleOnce(() => {
+            if (particle && particle.isValid) particle.destroy();
+        }, 1.0);
     }
 
     private getBoardPosition(col: number, row: number): Vec3 {
